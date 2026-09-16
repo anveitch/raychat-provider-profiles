@@ -49,6 +49,7 @@
     "trust_filename": "trust.json",
     "user_info_filename": "user_info.json",
     "profiles_directory": "profiles",
+    "catalogs_directory": "catalogs",
     "sessions_directory": "sessions",
     "session_suffix": ".jsonl",
     "session_schema_version": 1,

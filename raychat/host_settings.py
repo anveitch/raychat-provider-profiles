@@ -313,6 +313,7 @@ class StorageSettings:
     trust_filename: str
     user_info_filename: str
     profiles_directory: str
+    catalogs_directory: str
     sessions_directory: str
     session_suffix: str
     session_schema_version: int
@@ -361,6 +362,10 @@ class StorageSettings:
             profiles_directory=text_field(
                 fields.get("profiles_directory"),
                 f"{path}.profiles_directory",
+            ),
+            catalogs_directory=text_field(
+                fields.get("catalogs_directory"),
+                f"{path}.catalogs_directory",
             ),
             sessions_directory=text_field(
                 fields.get("sessions_directory"),
