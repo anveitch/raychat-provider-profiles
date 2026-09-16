@@ -133,7 +133,7 @@ class ChatAPITests(ProviderTestCase):
             clone: object = CHAT.validate(runtime.services[CHAT.name]).factory()
             runtime.state.setdefault("chat_completions", {})["models"] = [
                 "original",
-                "nemotron",
+                "beta",
             ]
             notices: list[str] = []
 
@@ -141,7 +141,7 @@ class ChatAPITests(ProviderTestCase):
                 if kind == "notification":
                     notices.append(text_field(payload["message"], "notification"))
 
-            runtime.select_menu("models", "nemotron", notify=notify)
+            runtime.select_menu("models", "beta", notify=notify)
             if not isinstance(primary, ExportedProvider) or not isinstance(
                 clone,
                 ExportedProvider,
@@ -152,7 +152,7 @@ class ChatAPITests(ProviderTestCase):
             self.require("model" not in runtime.state["chat_completions"])
             self.equal(
                 notices,
-                ["Set RAYCHAT_MODEL to nemotron and restart RayChat to use it."],
+                ["Set RAYCHAT_MODEL to beta and restart RayChat to use it."],
             )
             if resources.store is None:
                 self.fail("The fixture requires a session journal.")
@@ -172,12 +172,12 @@ class ChatAPITests(ProviderTestCase):
     def test_models_uses_get_and_configured_credentials(self) -> None:
         """Discover all identifiers without posting a completion or changing model."""
         catalog: dict[str, object] = {
-            "data": [{"id": "nemotron"}, {"id": "alpha"}, {"id": "nemotron"}],
+            "data": [{"id": "beta"}, {"id": "alpha"}, {"id": "beta"}],
         }
         api, opener, response = make_api(json.dumps(catalog).encode())
         api.url = "https://example.test/prefix/v1/chat/completions?version=1"
         original = api.model
-        self.equal(api.list_models(), ["alpha", "nemotron"])
+        self.equal(api.list_models(), ["alpha", "beta"])
         request = opener.single_request()
         self.equal(request.get_method(), "GET")
         self.equal(request.data, None)
