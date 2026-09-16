@@ -311,6 +311,7 @@ class StorageSettings:
     workspace_plugin_directory: str
     user_plugin_directory: str
     trust_filename: str
+    user_info_filename: str
     sessions_directory: str
     session_suffix: str
     session_schema_version: int
@@ -351,6 +352,10 @@ class StorageSettings:
             trust_filename=text_field(
                 fields.get("trust_filename"),
                 f"{path}.trust_filename",
+            ),
+            user_info_filename=text_field(
+                fields.get("user_info_filename"),
+                f"{path}.user_info_filename",
             ),
             sessions_directory=text_field(
                 fields.get("sessions_directory"),

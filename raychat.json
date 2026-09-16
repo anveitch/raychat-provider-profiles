@@ -47,6 +47,7 @@
     "workspace_plugin_directory": ".raychat/plugins",
     "user_plugin_directory": "plugins",
     "trust_filename": "trust.json",
+    "user_info_filename": "user_info.json",
     "sessions_directory": "sessions",
     "session_suffix": ".jsonl",
     "session_schema_version": 1,
