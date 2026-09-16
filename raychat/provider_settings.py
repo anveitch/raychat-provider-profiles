@@ -9,7 +9,10 @@ from urllib.parse import urlsplit, urlunsplit
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-_REQUIRED = ("RAYCHAT_AUTH_TOKEN", "RAYCHAT_MODEL", "RAYCHAT_BASE_URL")
+CREDENTIAL_VARIABLE = "RAYCHAT_AUTH_TOKEN"
+MODEL_VARIABLE = "RAYCHAT_MODEL"
+BASE_URL_VARIABLE = "RAYCHAT_BASE_URL"
+_REQUIRED = (CREDENTIAL_VARIABLE, MODEL_VARIABLE, BASE_URL_VARIABLE)
 _HELP = (
     "Export the missing or empty variables in the same shell that launches RayChat. "
     "Environment files are not loaded automatically. In Bash/Zsh, load your "
@@ -75,15 +78,89 @@ class ProviderSettings:
         return self.base_url + "/models"
 
 
-def _base_url(value: str) -> str:
+def checked_auth_token(value: str, source: str = CREDENTIAL_VARIABLE) -> str:
+    """Check a credential that must survive verbatim inside a request header.
+
+    The same rule applies wherever a credential originates, so a stored or
+    prompted value can never reach the provider through a weaker check than an
+    exported variable. The rejected value is never echoed in the message.
+
+    Returns
+    -------
+    str
+        The credential without surrounding whitespace.
+
+    Raises
+    ------
+    ValueError
+        If the credential is blank or contains characters a header rejects.
+
+    """
+    token = value.strip()
+    if not token:
+        message = f"{source} must not be empty."
+        raise ValueError(message)
+    if any(not "!" <= character <= "~" for character in token):
+        message = f"{source} must contain printable ASCII without whitespace."
+        raise ValueError(message)
+    return token
+
+
+def checked_model(value: str, source: str = MODEL_VARIABLE) -> str:
+    """Check a model identifier that must form a valid request body field.
+
+    Returns
+    -------
+    str
+        The model identifier without surrounding whitespace.
+
+    Raises
+    ------
+    ValueError
+        If the identifier is blank or carries control characters.
+
+    """
+    model = value.strip()
+    if not model:
+        message = f"{source} must not be empty."
+        raise ValueError(message)
+    if not model.isprintable():
+        message = f"{source} must be a model ID without control characters."
+        raise ValueError(message)
+    return model
+
+
+def checked_base_url(value: str, source: str = BASE_URL_VARIABLE) -> str:
+    """Normalize an API root and reject anything that could redirect traffic.
+
+    A URL ending in the chat-completions path is accepted and reduced back to
+    its root, so both spellings resolve to one identity.
+
+    Returns
+    -------
+    str
+        The normalized API root, without a trailing separator.
+
+    Raises
+    ------
+    ValueError
+        If the value is not an absolute credential-free HTTP(S) URL.
+
+    """
     message = (
-        "RAYCHAT_BASE_URL must be an absolute HTTP(S) API base URL "
+        f"{source} must be an absolute HTTP(S) API base URL "
         "with a hostname and no credentials, query, fragment, or whitespace."
     )
-    if any(character.isspace() or not character.isprintable() for character in value):
+    candidate = value.strip()
+    if not candidate:
+        empty_message = f"{source} must not be empty."
+        raise ValueError(empty_message)
+    if any(
+        character.isspace() or not character.isprintable() for character in candidate
+    ):
         raise ValueError(message)
     try:
-        parsed = urlsplit(value)
+        parsed = urlsplit(candidate)
         port = parsed.port
         valid = (
             parsed.scheme in {"http", "https"}
@@ -93,7 +170,7 @@ def _base_url(value: str) -> str:
             and not parsed.query
             and not parsed.fragment
             and (port is None or port > 0)
-            and "\\" not in value
+            and "\\" not in candidate
         )
     except ValueError:
         raise ValueError(message) from None
@@ -121,16 +198,8 @@ def provider_settings(environ: Mapping[str, str]) -> ProviderSettings:
     if missing:
         message = "Missing required environment variables: " + ", ".join(missing)
         raise ValueError(message + ".\n" + environment_status(environ) + "\n" + _HELP)
-    token = environ["RAYCHAT_AUTH_TOKEN"].strip()
-    model = environ["RAYCHAT_MODEL"].strip()
-    if any(not "!" <= character <= "~" for character in token):
-        message = "RAYCHAT_AUTH_TOKEN must contain printable ASCII without whitespace."
-        raise ValueError(message)
-    if not model.isprintable():
-        message = "RAYCHAT_MODEL must be a model ID without control characters."
-        raise ValueError(message)
     return ProviderSettings(
-        auth_token=token,
-        model=model,
-        base_url=_base_url(environ["RAYCHAT_BASE_URL"].strip()),
+        auth_token=checked_auth_token(environ[CREDENTIAL_VARIABLE]),
+        model=checked_model(environ[MODEL_VARIABLE]),
+        base_url=checked_base_url(environ[BASE_URL_VARIABLE]),
     )
