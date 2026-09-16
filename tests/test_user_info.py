@@ -1,4 +1,4 @@
-"""Stored provider identity obeys the rules the exported environment obeys."""
+"""Stored provider identities obey the rules the exported environment obeys."""
 
 from __future__ import annotations
 
@@ -10,10 +10,16 @@ from pathlib import Path
 
 from raychat.provider_settings import provider_settings
 from raychat.user_info import (
+    MAX_NICKNAME_CHARS,
     SCHEMA_VERSION,
+    Profile,
     UserInfo,
+    load_profile,
     load_user_info,
+    profile_slug,
+    save_profile,
     save_user_info,
+    stored_profile_slugs,
     user_info_path,
 )
 from raychat.validation import json_object, object_field
@@ -29,22 +35,61 @@ _VARIABLES = {
 }
 
 
-def _written(directory: str, payload: object) -> Path:
-    target = Path(directory) / "user_info.json"
+def _written(directory: str, payload: object, name: str = "work.json") -> Path:
+    target = Path(directory) / name
     target.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
     return target
 
 
-class UserInfoStorageTests(TypedTestCase):
+class ProfileSlugTests(TypedTestCase):
+    """Derive file names that survive every supported platform."""
+
+    def test_nicknames_reduce_to_portable_lowercase_names(self) -> None:
+        """Strip whatever a file system would reject or compare inconsistently."""
+        for nickname, expected in (
+            ("work", "work"),
+            ("Work", "work"),
+            ("  Work Laptop  ", "work-laptop"),
+            ("work/../etc", "work-etc"),
+            ("a:b|c?d*e", "a-b-c-d-e"),
+            ("my.key", "my-key"),
+            ("under_score", "under_score"),
+            ("--dashes--", "dashes"),
+        ):
+            with self.subTest(nickname=nickname):
+                self.equal(profile_slug(nickname), expected)
+
+    def test_names_that_differ_only_in_case_address_one_profile(self) -> None:
+        """Windows and macOS compare case-insensitively; resolve it deliberately."""
+        self.equal(profile_slug("Work"), profile_slug("WORK"))
+
+    def test_reserved_device_names_never_become_file_names(self) -> None:
+        """Windows refuses these names with any extension, on every drive."""
+        for nickname in ("con", "PRN", "aux", "NUL", "com1", "lpt9"):
+            with self.subTest(nickname=nickname):
+                self.require(profile_slug(nickname).startswith("profile-"))
+
+    def test_a_nickname_in_another_script_still_yields_a_usable_name(self) -> None:
+        """A name with no ASCII must not be refused; fall back to a stable digest."""
+        first = profile_slug("仕事")
+        self.equal(first, profile_slug("仕事"))
+        self.require(first.startswith("profile-"))
+        self.require(first != profile_slug("私用"))
+
+    def test_unusable_nicknames_are_refused(self) -> None:
+        """A blank or oversized name cannot identify anything."""
+        for nickname in ("", "   ", "work\x00", "w" * (MAX_NICKNAME_CHARS + 1)):
+            with self.subTest(nickname=nickname), self.rejected(ValueError):
+                profile_slug(nickname)
+
+
+class ProfileStorageTests(TypedTestCase):
     """Check the round trip, its permissions and its atomic replacement."""
 
-    def test_absent_file_reports_no_configuration_rather_than_failing(self) -> None:
+    def test_absent_profile_reports_nothing_stored_rather_than_failing(self) -> None:
         """A first launch has nothing stored and must not be an error."""
         with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "home" / "user_info.json"
-            stored = load_user_info(target)
-            self.equal(stored, UserInfo())
-            self.require(not target.parent.exists())
+            self.equal(load_profile(Path(directory) / "missing.json"), None)
 
     def test_round_trip_normalizes_the_url_and_keeps_the_credential_hidden(
         self,
@@ -55,39 +100,47 @@ class UserInfoStorageTests(TypedTestCase):
                 self.subTest(suffix=suffix),
                 tempfile.TemporaryDirectory() as directory,
             ):
-                target = Path(directory) / "user_info.json"
-                save_user_info(
-                    UserInfo(
+                target = Path(directory) / "work.json"
+                save_profile(
+                    Profile(
+                        nickname="Work",
                         auth_token=_FIXTURE_CREDENTIAL,
                         model="vendor/configured-model",
                         base_url=_FIXTURE_URL + suffix,
                     ),
                     target,
                 )
-                stored = load_user_info(target)
-                self.equal(stored.base_url, _FIXTURE_URL)
-                self.equal(stored.model, "vendor/configured-model")
-                self.equal(stored.auth_token, _FIXTURE_CREDENTIAL)
-                self.require(_FIXTURE_CREDENTIAL not in repr(stored))
+                stored = load_profile(target)
+                if stored is None:
+                    self.fail("Expected the saved profile to load.")
+                else:
+                    self.equal(stored.nickname, "Work")
+                    self.equal(stored.base_url, _FIXTURE_URL)
+                    self.equal(stored.model, "vendor/configured-model")
+                    self.equal(stored.auth_token, _FIXTURE_CREDENTIAL)
+                    self.require(_FIXTURE_CREDENTIAL not in repr(stored))
 
-    def test_partial_configuration_stays_valid_for_a_single_recorded_choice(
-        self,
-    ) -> None:
+    def test_partial_profile_stays_valid_for_a_single_recorded_choice(self) -> None:
         """A model menu records one field without inventing a URL or credential."""
         with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "user_info.json"
-            save_user_info(UserInfo(model="vendor/chosen"), target)
-            stored = load_user_info(target)
-            self.equal(stored, UserInfo(model="vendor/chosen"))
+            target = Path(directory) / "work.json"
+            save_profile(Profile(nickname="Work", model="vendor/chosen"), target)
+            stored = load_profile(target)
+            if stored is None:
+                self.fail("Expected the saved profile to load.")
+            else:
+                self.equal(stored.model, "vendor/chosen")
+                self.equal(stored.auth_token, None)
+                self.equal(stored.base_url, None)
             written = object_field(json_object(target.read_bytes()), "stored")
-            self.equal(sorted(written), ["model", "schema_version"])
+            self.equal(sorted(written), ["model", "nickname", "schema_version"])
 
     def test_stored_credential_is_readable_only_by_its_owner(self) -> None:
         """A plaintext credential at rest must never widen beyond its owner."""
         with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "home" / "user_info.json"
-            saved = save_user_info(
-                UserInfo(auth_token=_FIXTURE_CREDENTIAL),
+            target = Path(directory) / "profiles" / "work.json"
+            saved = save_profile(
+                Profile(nickname="Work", auth_token=_FIXTURE_CREDENTIAL),
                 target,
             )
             self.require(saved.is_file())
@@ -100,29 +153,63 @@ class UserInfoStorageTests(TypedTestCase):
     ) -> None:
         """An overwrite replaces the file in place without scattering fragments."""
         with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "user_info.json"
-            save_user_info(UserInfo(model="vendor/first"), target)
-            save_user_info(UserInfo(model="vendor/second"), target)
-            self.equal(load_user_info(target).model, "vendor/second")
-            self.equal(
-                [item.name for item in Path(directory).iterdir()],
-                [
-                    "user_info.json",
-                ],
-            )
+            target = Path(directory) / "work.json"
+            save_profile(Profile(nickname="Work", model="vendor/first"), target)
+            save_profile(Profile(nickname="Work", model="vendor/second"), target)
+            stored = load_profile(target)
+            if stored is None:
+                self.fail("Expected the saved profile to load.")
+            else:
+                self.equal(stored.model, "vendor/second")
+            self.equal([item.name for item in Path(directory).iterdir()], ["work.json"])
 
     def test_an_invalid_value_is_rejected_before_the_previous_file_changes(
         self,
     ) -> None:
         """Validation precedes the write, so a bad input cannot destroy a good file."""
         with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "user_info.json"
-            save_user_info(UserInfo(model="vendor/good"), target)
+            target = Path(directory) / "work.json"
+            save_profile(Profile(nickname="Work", model="vendor/good"), target)
             with self.rejected(ValueError):
-                save_user_info(UserInfo(base_url="not-a-url"), target)
-            self.equal(load_user_info(target).model, "vendor/good")
+                save_profile(Profile(nickname="Work", base_url="not-a-url"), target)
+            stored = load_profile(target)
+            if stored is None:
+                self.fail("Expected the original profile to survive.")
+            else:
+                self.equal(stored.model, "vendor/good")
 
-    def test_default_location_sits_in_the_operator_home_directory(self) -> None:
+    def test_stored_profiles_are_listed_without_parsing_them(self) -> None:
+        """A menu needs the names even when one file is unreadable."""
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            self.equal(stored_profile_slugs(folder / "absent"), ())
+            save_profile(Profile(nickname="Work"), folder / "work.json")
+            save_profile(Profile(nickname="Home"), folder / "home.json")
+            (folder / "notes.txt").write_text("ignored", encoding="utf-8")
+            self.equal(stored_profile_slugs(folder), ("home", "work"))
+
+
+class ActiveProfileTests(TypedTestCase):
+    """Check the pointer naming the profile the next launch uses."""
+
+    def test_absent_pointer_selects_nothing(self) -> None:
+        """Having no stored selection is an ordinary first-run state."""
+        with tempfile.TemporaryDirectory() as directory:
+            self.equal(
+                load_user_info(Path(directory) / "user_info.json"),
+                UserInfo(),
+            )
+
+    def test_pointer_round_trip_stores_the_derived_name(self) -> None:
+        """Record the file name, not the display name, so lookup cannot drift."""
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "user_info.json"
+            save_user_info(UserInfo(active_profile="Work Laptop"), target)
+            self.equal(load_user_info(target).active_profile, "work-laptop")
+            written = object_field(json_object(target.read_bytes()), "stored")
+            self.equal(sorted(written), ["active_profile", "schema_version"])
+
+    def test_default_locations_sit_in_the_operator_home_directory(self) -> None:
         """Resolve the same home the supervisor uses rather than the workspace."""
         path = user_info_path()
         self.equal(path.name, "user_info.json")
@@ -130,7 +217,7 @@ class UserInfoStorageTests(TypedTestCase):
         self.equal(path.parent.parent, Path.home())
 
 
-class UserInfoValidationTests(TypedTestCase):
+class ProfileValidationTests(TypedTestCase):
     """Reject stored values the exported environment would also reject."""
 
     def test_stored_values_are_rejected_wherever_the_environment_rejects_them(
@@ -160,13 +247,17 @@ class UserInfoValidationTests(TypedTestCase):
                     provider_settings(
                         {**provider_environment(), _VARIABLES[name]: value},
                     )
-                # The stored file must reject it for the same reason.
+                # The stored profile must reject it for the same reason.
                 target = _written(
                     directory,
-                    {"schema_version": SCHEMA_VERSION, name: value},
+                    {
+                        "schema_version": SCHEMA_VERSION,
+                        "nickname": "Work",
+                        name: value,
+                    },
                 )
                 with self.rejected(ValueError, name):
-                    load_user_info(target)
+                    load_profile(target)
 
     def test_rejection_messages_never_echo_the_stored_credential(self) -> None:
         """Error text is copied into logs and support requests; keep it clean."""
@@ -175,16 +266,17 @@ class UserInfoValidationTests(TypedTestCase):
                 directory,
                 {
                     "schema_version": SCHEMA_VERSION,
+                    "nickname": "Work",
                     "auth_token": "synthetic-sensitive-value\r\n",
                     "base_url": "not-a-url",
                 },
             )
             error = ""
             try:
-                load_user_info(target)
+                load_profile(target)
             except ValueError as exc:
                 error = str(exc)
-            self.require(error, "Expected the malformed file to be rejected.")
+            self.require(error, "Expected the malformed profile to be rejected.")
             self.require("synthetic-sensitive-value" not in error)
             self.require("not-a-url" not in error)
 
@@ -193,16 +285,21 @@ class UserInfoValidationTests(TypedTestCase):
     ) -> None:
         """A misspelled field silently ignored would look like a saved setting."""
         for payload in (
-            {"schema_version": SCHEMA_VERSION, "auth_tokenn": _FIXTURE_CREDENTIAL},
-            {"schema_version": SCHEMA_VERSION, "url": _FIXTURE_URL},
-            {"model": "vendor/configured-model"},
+            {
+                "schema_version": SCHEMA_VERSION,
+                "nickname": "Work",
+                "auth_tokenn": _FIXTURE_CREDENTIAL,
+            },
+            {"schema_version": SCHEMA_VERSION, "nickname": "Work", "url": _FIXTURE_URL},
+            {"schema_version": SCHEMA_VERSION},
+            {"nickname": "Work"},
         ):
             with (
                 self.subTest(payload=payload),
                 tempfile.TemporaryDirectory() as directory,
                 self.rejected(ValueError),
             ):
-                load_user_info(_written(directory, payload))
+                load_profile(_written(directory, payload))
 
     def test_an_unsupported_schema_version_is_refused(self) -> None:
         """Refuse a format this build cannot interpret instead of guessing."""
@@ -212,48 +309,46 @@ class UserInfoValidationTests(TypedTestCase):
                 tempfile.TemporaryDirectory() as directory,
                 self.rejected(ValueError),
             ):
-                load_user_info(_written(directory, {"schema_version": version}))
+                load_profile(
+                    _written(
+                        directory,
+                        {"schema_version": version, "nickname": "Work"},
+                    ),
+                )
 
     def test_malformed_and_non_object_documents_are_refused(self) -> None:
         """A truncated or replaced file must not resolve to a partial identity."""
         with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "user_info.json"
+            target = Path(directory) / "work.json"
             for text in ("", "{", "[]", '"text"', "null", '{"a": 1, "a": 2}'):
                 with self.subTest(text=text):
                     target.write_text(text, encoding="utf-8")
                     with self.rejected(ValueError):
-                        load_user_info(target)
+                        load_profile(target)
 
     def test_an_oversized_file_is_refused_without_reading_it_entirely(self) -> None:
         """Bound the read so a substituted file cannot exhaust memory."""
         with tempfile.TemporaryDirectory() as directory:
-            target = Path(directory) / "user_info.json"
             oversized: dict[str, object] = {
                 "schema_version": SCHEMA_VERSION,
+                "nickname": "Work",
                 "model": "v/" + "m" * 100_000,
             }
-            target.write_text(
-                json.dumps(oversized, ensure_ascii=False),
-                encoding="utf-8",
-            )
+            target = _written(directory, oversized)
             with self.rejected(ValueError, "exceeds"):
-                load_user_info(target)
+                load_profile(target)
 
-    def test_a_symlinked_configuration_is_refused(self) -> None:
+    def test_a_symlinked_profile_is_refused(self) -> None:
         """Owner-only permissions describe this file, not a target it points at."""
         if os.name != "posix":
             return
         with tempfile.TemporaryDirectory() as directory:
-            actual = Path(directory) / "elsewhere.json"
-            valid: dict[str, object] = {
-                "schema_version": SCHEMA_VERSION,
-                "model": "vendor/m",
-            }
-            actual.write_text(
-                json.dumps(valid, ensure_ascii=False),
-                encoding="utf-8",
+            actual = _written(
+                directory,
+                {"schema_version": SCHEMA_VERSION, "nickname": "Work"},
+                name="elsewhere.json",
             )
-            link = Path(directory) / "user_info.json"
+            link = Path(directory) / "work.json"
             link.symlink_to(actual)
             with self.rejected(ValueError, "symlink"):
-                load_user_info(link)
+                load_profile(link)
