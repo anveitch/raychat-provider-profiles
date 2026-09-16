@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import getpass
 import math
 import os
 import sys
@@ -12,7 +13,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Mapping, MutableMapping, Sequence
+    from typing import TextIO
 
     from .ui.terminal import InteractiveTerminal
     from .workers import AgentWorker
@@ -21,6 +23,7 @@ from raychat.configuration import SETTINGS
 
 from ._common import _is_positive_finite_number
 from .application import add_arguments, add_plugin_arguments
+from .first_run import configure_interactively
 from .http_debug import DEBUG_DIRECTORY_ENV
 from .presentation import console_text
 from .provider_resolution import apply_stored_identity
@@ -457,6 +460,36 @@ def _provider_preflight(argv: Sequence[str], environ: Mapping[str, str]) -> int 
     return None
 
 
+def _offer_first_run(argv: Sequence[str], environ: MutableMapping[str, str]) -> None:
+    """Offer interactive setup only when a person is present to answer it.
+
+    A pipeline, a CI job, an --exec run or a --help request must still fail or
+    print exactly as before, so nothing here runs unless the session owns a
+    terminal on both ends and the environment is genuinely incomplete.
+
+    """
+    reader: TextIO = sys.stdin
+    writer: TextIO = sys.stdout
+    if not bool(reader.isatty() and writer.isatty()):
+        return
+    if any(argument in {"--help", "-h", "--exec"} for argument in argv):
+        return
+    try:
+        provider_settings(environ)
+    except ValueError:
+        pass
+    else:
+        return
+    if configure_interactively(input, getpass.getpass, _setup_line) is None:
+        return
+    apply_stored_identity(environ)
+
+
+def _setup_line(text: str) -> None:
+    sys.stdout.write(text + "\n")
+    sys.stdout.flush()
+
+
 def main(
     argv: Sequence[str] | None = None,
     environ: Mapping[str, str] | None = None,
@@ -477,6 +510,7 @@ def main(
         environ = os.environ
         try:
             apply_stored_identity(os.environ)
+            _offer_first_run(arguments, os.environ)
         except (ValueError, OSError) as exc:
             sys.stderr.write("Error: " + str(exc) + "\n")
             return 1

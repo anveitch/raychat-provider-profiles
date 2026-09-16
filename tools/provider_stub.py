@@ -122,12 +122,14 @@ class StubHandler(BaseHTTPRequestHandler):
     catalog_path: ClassVar[str] = "/v1/models"
     chat_path: ClassVar[str] = "/v1/chat/completions"
     hide_catalog: ClassVar[bool] = False
+    quiet: ClassVar[bool] = False
     answered: int = 0
 
     @override
     def log_message(self, _format: str, *_args: object) -> None:
-        """Report each request on one line, without the default timestamp."""
-        _write(f"  {self.command} {self.path} -> {self.answered}")
+        """Report each request on one line, unless the caller asked for quiet."""
+        if not self.quiet:
+            _write(f"  {self.command} {self.path} -> {self.answered}")
 
     def reply(self, status: HTTPStatus, body: object) -> None:
         """Send one JSON document and record the status for the access log."""
@@ -196,6 +198,7 @@ def handler(
     prefix: str,
     *,
     hide: bool,
+    silent: bool = False,
 ) -> type[BaseHTTPRequestHandler]:
     """Bind one catalog, credential and route prefix to a handler class.
 
@@ -212,6 +215,7 @@ def handler(
         catalog_path = prefix + "/models"
         chat_path = prefix + "/chat/completions"
         hide_catalog = hide
+        quiet = silent
 
     return Handler
 

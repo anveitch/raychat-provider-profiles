@@ -1,0 +1,246 @@
+"""First-run setup asks for one identity, discovers its models and stores it."""
+
+from __future__ import annotations
+
+import tempfile
+import threading
+from contextlib import contextmanager
+from http.server import ThreadingHTTPServer
+from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest import mock
+
+from raychat.first_run import configure_interactively, fetch_models
+from raychat.user_info import load_profile, load_user_info, profile_path, user_info_path
+from tests.assertions import TypedTestCase
+from tools.provider_stub import handler
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+
+_CREDENTIAL = "stub-token"
+_CATALOG = ("vendor/first", "vendor/second", "vendor/third")
+
+
+class _Answers:
+    """Supply scripted answers and capture everything written to the operator."""
+
+    def __init__(self, answers: Sequence[str]) -> None:
+        """Queue the answers the prompts will consume in order."""
+        self.remaining = list(answers)
+        self.written: list[str] = []
+        self.prompts: list[str] = []
+
+    def read(self, prompt: str) -> str:
+        """Answer one prompt.
+
+        Returns
+        -------
+        str
+            The next scripted answer.
+
+        Raises
+        ------
+        EOFError
+            When the script is exhausted, as a closed input would.
+
+        """
+        self.prompts.append(prompt)
+        if not self.remaining:
+            raise EOFError
+        return self.remaining.pop(0)
+
+    def write(self, text: str) -> None:
+        """Record one line of setup output."""
+        self.written.append(text)
+
+    def transcript(self) -> str:
+        """Join everything written for whole-output assertions.
+
+        Returns
+        -------
+        str
+            Every line written during setup.
+
+        """
+        return "\n".join(self.written)
+
+
+@contextmanager
+def _served(*, hide_catalog: bool = False) -> Iterator[str]:
+    server = ThreadingHTTPServer(
+        ("127.0.0.1", 0),
+        handler(_CATALOG, _CREDENTIAL, "/v1", hide=hide_catalog, silent=True),
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/v1"
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(5)
+
+
+class DiscoveryTests(TypedTestCase):
+    """Ask a live endpoint which models a credential may use."""
+
+    def test_the_catalog_is_read_from_a_running_endpoint(self) -> None:
+        """The key and URL together decide the list; nothing is assumed."""
+        with _served() as base:
+            self.equal(fetch_models(base, _CREDENTIAL), _CATALOG)
+
+    def test_a_refused_credential_is_reported(self) -> None:
+        """A wrong key must fail loudly here rather than at the first message."""
+        with _served() as base, self.rejected(OSError):
+            fetch_models(base, "wrong-token")
+
+    def test_a_server_without_a_catalog_is_reported(self) -> None:
+        """Many compatible servers implement chat but publish no catalog."""
+        with _served(hide_catalog=True) as base, self.rejected(OSError):
+            fetch_models(base, _CREDENTIAL)
+
+
+class InteractiveSetupTests(TypedTestCase):
+    """Collect one identity, checking each answer as it is given."""
+
+    def test_setup_stores_a_profile_and_selects_it(self) -> None:
+        """A complete answer set leaves RayChat ready to launch."""
+        with tempfile.TemporaryDirectory() as home, _served() as base:
+            answers = _Answers(["Work Laptop", base, _CREDENTIAL, "2"])
+            with mock.patch("pathlib.Path.home", return_value=Path(home)):
+                profile = configure_interactively(
+                    answers.read,
+                    answers.read,
+                    answers.write,
+                )
+                if profile is None:
+                    self.fail("Expected setup to complete.")
+                else:
+                    self.equal(profile.nickname, "Work Laptop")
+                    self.equal(profile.model, "vendor/second")
+                stored = load_profile(profile_path("Work Laptop"))
+                self.equal(load_user_info().active_profile, "work-laptop")
+            if stored is None:
+                self.fail("Expected the profile to be stored.")
+            else:
+                self.equal(stored.auth_token, _CREDENTIAL)
+                self.equal(stored.base_url, base)
+
+    def test_the_discovered_catalog_is_offered_for_selection(self) -> None:
+        """The point of asking the endpoint is to save the user typing an ID."""
+        with tempfile.TemporaryDirectory() as home, _served() as base:
+            answers = _Answers(["Work", base, _CREDENTIAL, "1"])
+            with mock.patch("pathlib.Path.home", return_value=Path(home)):
+                configure_interactively(
+                    answers.read,
+                    answers.read,
+                    answers.write,
+                )
+            shown = answers.transcript()
+            for name in _CATALOG:
+                self.require(name in shown, f"Expected {name} to be offered.")
+            self.require("3 model(s)" in shown)
+
+    def test_an_identifier_may_be_typed_instead_of_chosen(self) -> None:
+        """A proxy may expose a model it does not advertise."""
+        with tempfile.TemporaryDirectory() as home, _served() as base:
+            answers = _Answers(["Work", base, _CREDENTIAL, "vendor/unlisted"])
+            with mock.patch("pathlib.Path.home", return_value=Path(home)):
+                profile = configure_interactively(
+                    answers.read,
+                    answers.read,
+                    answers.write,
+                )
+            if profile is None:
+                self.fail("Expected setup to complete.")
+            else:
+                self.equal(profile.model, "vendor/unlisted")
+
+    def test_a_server_without_a_catalog_still_completes_setup(self) -> None:
+        """A missing catalog is a degraded path, never a dead end."""
+        with (
+            tempfile.TemporaryDirectory() as home,
+            _served(hide_catalog=True) as base,
+        ):
+            answers = _Answers(["Bare", base, _CREDENTIAL, "vendor/typed"])
+            with mock.patch("pathlib.Path.home", return_value=Path(home)):
+                profile = configure_interactively(
+                    answers.read,
+                    answers.read,
+                    answers.write,
+                )
+            if profile is None:
+                self.fail("Expected setup to complete without a catalog.")
+            else:
+                self.equal(profile.model, "vendor/typed")
+            self.require("publishes no model catalog" in answers.transcript())
+
+    def test_an_invalid_answer_is_refused_at_the_prompt(self) -> None:
+        """A typo is caught while the user is present, not at the first request."""
+        with tempfile.TemporaryDirectory() as home, _served() as base:
+            answers = _Answers(
+                ["Work", "not-a-url", base, _CREDENTIAL, "1"],
+            )
+            with mock.patch("pathlib.Path.home", return_value=Path(home)):
+                profile = configure_interactively(
+                    answers.read,
+                    answers.read,
+                    answers.write,
+                )
+            if profile is None:
+                self.fail("Expected setup to continue after a correction.")
+            else:
+                self.equal(profile.base_url, base)
+            self.require("RAYCHAT_BASE_URL must" in answers.transcript())
+
+    def test_cancelling_stores_nothing(self) -> None:
+        """An abandoned setup must not leave a half-written identity behind."""
+        with tempfile.TemporaryDirectory() as home:
+            answers = _Answers([])
+            with mock.patch("pathlib.Path.home", return_value=Path(home)):
+                self.equal(
+                    configure_interactively(
+                        answers.read,
+                        answers.read,
+                        answers.write,
+                    ),
+                    None,
+                )
+                self.require(not user_info_path().exists())
+
+    def test_a_refused_credential_is_named_as_such_and_can_be_corrected(
+        self,
+    ) -> None:
+        """A wrong token must not be reported as a server without a catalog."""
+        with (
+            tempfile.TemporaryDirectory() as home,
+            _served() as base,
+        ):
+            answers = _Answers(["Work", base, "wrong-token", _CREDENTIAL, "1"])
+            with mock.patch("pathlib.Path.home", return_value=Path(home)):
+                profile = configure_interactively(
+                    answers.read,
+                    answers.read,
+                    answers.write,
+                )
+            shown = answers.transcript()
+            self.require("refused this credential" in shown)
+            self.require("publishes no model catalog" not in shown)
+            if profile is None:
+                self.fail("Expected the corrected credential to be accepted.")
+            else:
+                self.equal(profile.auth_token, _CREDENTIAL)
+                self.equal(profile.model, _CATALOG[0])
+
+    def test_the_credential_is_never_written_to_the_transcript(self) -> None:
+        """Setup output is read over shoulders and pasted into support requests."""
+        with tempfile.TemporaryDirectory() as home, _served() as base:
+            answers = _Answers(["Work", base, _CREDENTIAL, "1"])
+            with mock.patch("pathlib.Path.home", return_value=Path(home)):
+                configure_interactively(
+                    answers.read,
+                    answers.read,
+                    answers.write,
+                )
+            self.require(_CREDENTIAL not in answers.transcript())
