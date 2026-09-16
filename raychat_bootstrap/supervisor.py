@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from raychat.configuration import SETTINGS
+from raychat.provider_resolution import apply_stored_identity
 from raychat.provider_settings import provider_settings
 from raychat.ui.terminal import TerminalSession
 from raychat.ui.terminal_control import termination_signal_bridge
@@ -1013,8 +1014,9 @@ def main() -> int:
 
     """
     try:
+        apply_stored_identity(os.environ)
         provider_settings(os.environ)
-    except ValueError as error:
+    except (ValueError, OSError) as error:
         sys.stderr.write("Error: " + str(error) + "\n")
         return 1
     operator_home = Path.home() / SETTINGS.storage.home_directory

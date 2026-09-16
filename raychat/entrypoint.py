@@ -23,6 +23,7 @@ from ._common import _is_positive_finite_number
 from .application import add_arguments, add_plugin_arguments
 from .http_debug import DEBUG_DIRECTORY_ENV
 from .presentation import console_text
+from .provider_resolution import apply_stored_identity
 from .provider_settings import provider_settings
 from .resources import AgentResources, create_resources, create_worker
 from .storage import SessionStore
@@ -468,8 +469,17 @@ def main(
         The session exit code, including 130 for keyboard cancellation.
 
     """
-    environ = os.environ if environ is None else environ
     arguments = sys.argv[1:] if argv is None else argv
+    if environ is None:
+        # A real launch may complete its environment from the selected profile;
+        # an environment supplied by a caller is taken as the whole world, so
+        # embedding and tests stay independent of whatever this operator stored.
+        environ = os.environ
+        try:
+            apply_stored_identity(os.environ)
+        except (ValueError, OSError) as exc:
+            sys.stderr.write("Error: " + str(exc) + "\n")
+            return 1
     preflight = _provider_preflight(arguments, environ)
     if preflight is not None:
         return preflight
