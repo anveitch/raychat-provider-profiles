@@ -11,8 +11,21 @@ from typing import TYPE_CHECKING
 from unittest import mock
 
 from raychat.configuration import SETTINGS
-from raychat.first_run import configure_interactively, fetch_models
-from raychat.user_info import load_profile, load_user_info, profile_path, user_info_path
+from raychat.first_run import (
+    NEW_PROFILE,
+    choose_profile,
+    configure_interactively,
+    fetch_models,
+    profile_entries,
+)
+from raychat.user_info import (
+    Profile,
+    load_profile,
+    load_user_info,
+    profile_path,
+    save_profile,
+    user_info_path,
+)
 from tests.assertions import TypedTestCase
 from tools.provider_stub import StubConfig, handler
 
@@ -21,6 +34,7 @@ if TYPE_CHECKING:
 
 _CREDENTIAL = "stub-token"
 _CATALOG = ("vendor/first", "vendor/second", "vendor/third")
+_URL = "https://profile-fixture.invalid/v1"
 
 
 class _Answers:
@@ -287,3 +301,96 @@ class InteractiveSetupTests(TypedTestCase):
                     answers.write,
                 )
             self.require(_CREDENTIAL not in answers.transcript())
+
+
+class ProfileChoiceTests(TypedTestCase):
+    """Pick which stored identity a session runs under, or add another."""
+
+    @staticmethod
+    def _stored(home: str) -> Path:
+        directory = Path(home) / "profiles"
+        save_profile(
+            Profile(nickname="stark-dev", model="gpt-4o", base_url=_URL),
+            directory / "stark-dev.json",
+        )
+        save_profile(
+            Profile(nickname="stark-prod", model="stark-default", base_url=_URL),
+            directory / "stark-prod.json",
+        )
+        return directory
+
+    def test_a_single_profile_is_still_listed(self) -> None:
+        """The identity a session runs under is stated, never assumed."""
+        with tempfile.TemporaryDirectory() as home:
+            directory = Path(home) / "profiles"
+            save_profile(
+                Profile(nickname="only", model="m", base_url=_URL),
+                directory / "only.json",
+            )
+            entries = profile_entries(("only",), directory)
+            answers = _Answers(["1"])
+            self.equal(choose_profile(answers.read, answers.write, entries), "only")
+            self.require("only" in answers.transcript())
+
+    def test_each_entry_names_its_model(self) -> None:
+        """Nicknames alone do not distinguish two configurations at a glance."""
+        with tempfile.TemporaryDirectory() as home:
+            directory = self._stored(home)
+            entries = profile_entries(("stark-dev", "stark-prod"), directory)
+            labels = [label for _, label in entries]
+            self.require(any("gpt-4o" in label for label in labels))
+            self.require(any("stark-default" in label for label in labels))
+
+    def test_the_active_profile_is_marked_and_taken_by_default(self) -> None:
+        """Pressing Enter must keep the identity the last session used."""
+        with tempfile.TemporaryDirectory() as home:
+            directory = self._stored(home)
+            entries = profile_entries(("stark-dev", "stark-prod"), directory)
+            answers = _Answers([""])
+            self.equal(
+                choose_profile(answers.read, answers.write, entries, "stark-prod"),
+                "stark-prod",
+            )
+            self.require("(current)" in answers.transcript())
+
+    def test_adding_another_configuration_is_always_offered(self) -> None:
+        """With a profile stored, setup never runs again, so this is the only way."""
+        with tempfile.TemporaryDirectory() as home:
+            directory = self._stored(home)
+            entries = profile_entries(("stark-dev", "stark-prod"), directory)
+            answers = _Answers(["3"])
+            self.equal(
+                choose_profile(answers.read, answers.write, entries),
+                NEW_PROFILE,
+            )
+            self.require("Add a new configuration" in answers.transcript())
+
+    def test_an_answer_outside_the_list_is_refused(self) -> None:
+        """A mistyped number must not silently select something else."""
+        with tempfile.TemporaryDirectory() as home:
+            directory = self._stored(home)
+            entries = profile_entries(("stark-dev", "stark-prod"), directory)
+            answers = _Answers(["9", "nonsense", "2"])
+            self.equal(
+                choose_profile(answers.read, answers.write, entries),
+                "stark-prod",
+            )
+            self.require("between 1 and 3" in answers.transcript())
+
+    def test_an_unreadable_profile_is_listed_with_its_reason(self) -> None:
+        """Hiding a profile the operator created is worse than showing it is broken."""
+        with tempfile.TemporaryDirectory() as home:
+            directory = Path(home) / "profiles"
+            directory.mkdir(parents=True)
+            (directory / "broken.json").write_text("{not json", encoding="utf-8")
+            entries = profile_entries(("broken",), directory)
+            self.equal(len(entries), 1)
+            self.require("unreadable" in entries[0][1])
+
+    def test_cancelling_the_choice_launches_nothing(self) -> None:
+        """Declining to choose must not fall back to an arbitrary identity."""
+        with tempfile.TemporaryDirectory() as home:
+            directory = self._stored(home)
+            entries = profile_entries(("stark-dev", "stark-prod"), directory)
+            answers = _Answers([])
+            self.equal(choose_profile(answers.read, answers.write, entries), None)

@@ -23,7 +23,12 @@ from raychat.configuration import SETTINGS
 
 from ._common import _is_positive_finite_number
 from .application import add_arguments, add_plugin_arguments
-from .first_run import configure_interactively
+from .first_run import (
+    NEW_PROFILE,
+    choose_profile,
+    configure_interactively,
+    profile_entries,
+)
 from .http_debug import DEBUG_DIRECTORY_ENV
 from .presentation import console_text
 from .provider_resolution import apply_stored_identity
@@ -32,6 +37,15 @@ from .resources import AgentResources, create_resources, create_worker
 from .storage import SessionStore
 from .ui import controller, picker, terminal_control
 from .ui import terminal as terminal_ui
+from .user_info import (
+    Profile,
+    UserInfo,
+    load_profile,
+    load_user_info,
+    profiles_directory,
+    save_user_info,
+    stored_profile_slugs,
+)
 from .validation import boolean_field, configuration_fields, integer_field, text_field
 
 
@@ -151,6 +165,14 @@ def build_parser(
         help=(
             "Maximum raw action/result pairs retained from completed tasks "
             "during compaction"
+        ),
+    )
+    parser.add_argument(
+        "--profile",
+        default=None,
+        help=(
+            "Stored configuration to launch with, by name. Selects it without "
+            "asking, and records it for later launches."
         ),
     )
     parser.add_argument(
@@ -460,14 +482,30 @@ def _provider_preflight(argv: Sequence[str], environ: Mapping[str, str]) -> int 
     return None
 
 
+def _selected_profile(argv: Sequence[str]) -> str | None:
+    probe = argparse.ArgumentParser(add_help=False, allow_abbrev=False)
+    probe.add_argument("--profile", default=None)
+    known, _ = probe.parse_known_args(argv)
+    raw: object = vars(known)
+    fields = configuration_fields(raw, "profile argument")
+    return text_field(fields["profile"], "--profile", nullable=True)
+
+
 def _offer_first_run(argv: Sequence[str], environ: MutableMapping[str, str]) -> None:
-    """Offer interactive setup only when a person is present to answer it.
+    """Choose, or create, the stored identity this session runs under.
 
     A pipeline, a CI job, an --exec run or a --help request must still fail or
     print exactly as before, so nothing here runs unless the session owns a
-    terminal on both ends and the environment is genuinely incomplete.
+    terminal on both ends and the environment is genuinely incomplete. Naming a
+    profile explicitly selects it without asking, which is what a wrapper script
+    needs.
 
     """
+    named = _selected_profile(argv)
+    if named is not None:
+        save_user_info(UserInfo(active_profile=named))
+        apply_stored_identity(environ)
+        return
     reader: TextIO = sys.stdin
     writer: TextIO = sys.stdout
     if not bool(reader.isatty() and writer.isatty()):
@@ -480,9 +518,41 @@ def _offer_first_run(argv: Sequence[str], environ: MutableMapping[str, str]) -> 
         pass
     else:
         return
-    if configure_interactively(input, getpass.getpass, _setup_line) is None:
+    if _resolved_identity() is None:
         return
     apply_stored_identity(environ)
+
+
+def _resolved_identity() -> Profile | None:
+    """Pick a stored profile, or create one, returning what the session will use.
+
+    Returns
+    -------
+    Profile | None
+        The identity to launch with, or None when the operator cancelled.
+
+    """
+    directory = profiles_directory()
+    entries = profile_entries(stored_profile_slugs(directory), directory)
+    if not entries:
+        return configure_interactively(input, getpass.getpass, _setup_line)
+    chosen = choose_profile(
+        input,
+        _setup_line,
+        entries,
+        load_user_info().active_profile,
+    )
+    if chosen is None:
+        return None
+    if chosen == NEW_PROFILE:
+        return configure_interactively(
+            input,
+            getpass.getpass,
+            _setup_line,
+            heading="Adding another configuration.",
+        )
+    save_user_info(UserInfo(active_profile=chosen))
+    return load_profile(profiles_directory() / (chosen + ".json"))
 
 
 def _setup_line(text: str) -> None:

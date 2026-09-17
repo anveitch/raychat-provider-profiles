@@ -22,6 +22,7 @@ from .user_info import (
     UserInfo,
     checked_instruction_role,
     checked_nickname,
+    load_profile,
     profile_path,
     save_profile,
     save_user_info,
@@ -36,6 +37,7 @@ from .validation import (
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+    from pathlib import Path
 
 _USER_AGENT = "raychat-setup/1"
 _MAX_CATALOG_BYTES = 1 << 20
@@ -229,11 +231,84 @@ def _initial_model(
     return _asked(reader, writer, "Model: ", checked_model)
 
 
+NEW_PROFILE = "+"
+
+
+def profile_entries(slugs: Sequence[str], directory: Path) -> list[tuple[str, str]]:
+    """Describe each stored profile for the startup list.
+
+    A profile that cannot be read is listed with its reason rather than hidden,
+    because silently omitting one the operator knows they created is worse than
+    showing that it needs attention.
+
+    Returns
+    -------
+    list[tuple[str, str]]
+        The slug and a human label for each stored profile, in stored order.
+
+    """
+    entries: list[tuple[str, str]] = []
+    for slug in slugs:
+        try:
+            profile = load_profile(directory / (slug + ".json"))
+        except (ValueError, OSError) as exc:
+            entries.append((slug, f"{slug}  (unreadable: {exc})"))
+            continue
+        if profile is None:
+            entries.append((slug, f"{slug}  (missing)"))
+            continue
+        model = profile.model or "no model recorded"
+        entries.append((slug, f"{profile.nickname}  [{model}]"))
+    return entries
+
+
+def choose_profile(
+    reader: Callable[[str], str],
+    writer: Callable[[str], None],
+    entries: Sequence[tuple[str, str]],
+    active: str | None = None,
+) -> str | None:
+    """Ask which stored profile to launch, or to add another.
+
+    The list is shown even when only one profile exists, so the identity a
+    session runs under is always stated rather than assumed.
+
+    Returns
+    -------
+    str | None
+        The chosen slug, NEW_PROFILE to add one, or None when cancelled.
+
+    """
+    writer("Which configuration should this session use?")
+    default = 1
+    for index, (slug, label) in enumerate(entries, start=1):
+        marker = " (current)" if slug == active else ""
+        if slug == active:
+            default = index
+        writer(f"  {index:>2}. {label}{marker}")
+    writer(f"  {len(entries) + 1:>2}. Add a new configuration")
+    while True:
+        try:
+            answer = reader(f"Choose 1-{len(entries) + 1} [{default}]: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if not answer:
+            return entries[default - 1][0]
+        if answer.isdigit():
+            chosen = int(answer)
+            if chosen == len(entries) + 1:
+                return NEW_PROFILE
+            if 1 <= chosen <= len(entries):
+                return entries[chosen - 1][0]
+        writer(f"  Enter a number between 1 and {len(entries) + 1}.")
+
+
 def configure_interactively(
     reader: Callable[[str], str],
     secret_reader: Callable[[str], str],
     writer: Callable[[str], None],
     discover: Callable[[str, str], tuple[str, ...]] = fetch_models,
+    heading: str = "RayChat is not configured yet.",
 ) -> Profile | None:
     """Ask for one provider identity, verify it, and store it as the active one.
 
@@ -247,7 +322,7 @@ def configure_interactively(
         The stored identity, or None when the user declined to finish.
 
     """
-    writer("RayChat is not configured yet.")
+    writer(heading)
     writer("Answer a few questions, or press Enter alone to cancel.")
     base_url = _asked(
         reader,
