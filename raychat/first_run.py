@@ -9,6 +9,8 @@ from urllib.error import HTTPError
 from urllib.parse import urlsplit
 from urllib.request import Request
 
+from raychat.configuration import SETTINGS
+
 from .http_debug import build_http_opener
 from .provider_settings import (
     checked_auth_token,
@@ -18,6 +20,7 @@ from .provider_settings import (
 from .user_info import (
     Profile,
     UserInfo,
+    checked_instruction_role,
     checked_nickname,
     profile_path,
     save_profile,
@@ -126,11 +129,18 @@ def fetch_models(base_url: str, auth_token: str) -> tuple[str, ...]:
     return tuple(unique)
 
 
+def _role_prompt() -> str:
+    roles = ", ".join(SETTINGS.chat.instruction_roles)
+    default = SETTINGS.chat.instruction_role
+    return f"Context role for instructions ({roles}) [{default}]: "
+
+
 def _asked(
     reader: Callable[[str], str],
     writer: Callable[[str], None],
     prompt: str,
     check: Callable[[str], str],
+    default: str | None = None,
 ) -> str | None:
     """Ask until the answer passes its own rule, or the user gives up.
 
@@ -146,42 +156,13 @@ def _asked(
         except (EOFError, KeyboardInterrupt):
             return None
         if not answer.strip():
-            return None
+            # A prompt that shows a default treats Enter as accepting it;
+            # every other prompt treats a blank answer as giving up.
+            return None if default is None else check(default)
         try:
             return check(answer)
         except ValueError as exc:
             writer(f"  {exc}")
-
-
-def _offered(
-    writer: Callable[[str], None],
-    reader: Callable[[str], str],
-    models: Sequence[str],
-) -> str | None:
-    """Let the user pick from a discovered catalog, or type an identifier.
-
-    Returns
-    -------
-    str | None
-        The chosen model, or None when the user cancelled.
-
-    """
-    if not models:
-        writer("  Enter a model identifier this endpoint accepts.")
-        return _asked(reader, writer, "Model: ", checked_model)
-    writer(f"  The credential can use {len(models)} model(s):")
-    for index, name in enumerate(models[:_MAX_LISTED], start=1):
-        writer(f"    {index:>3}. {name}")
-    if len(models) > _MAX_LISTED:
-        writer(f"    ... and {len(models) - _MAX_LISTED} more.")
-
-    def chosen(answer: str) -> str:
-        text = answer.strip()
-        if text.isdigit() and 1 <= int(text) <= len(models):
-            return models[int(text) - 1]
-        return checked_model(text)
-
-    return _asked(reader, writer, "Model (number or identifier): ", chosen)
 
 
 def _discovered(
@@ -219,6 +200,31 @@ def _discovered(
         return (), False
 
 
+def _initial_model(
+    writer: Callable[[str], None],
+    reader: Callable[[str], str],
+    models: Sequence[str],
+) -> str | None:
+    """Adopt a model to start with, asking only when nothing was advertised.
+
+    The model is not asked for here on purpose: the catalog is only known after
+    the endpoint answers, and choosing from it belongs in the application where
+    the whole list is visible and switching is one keystroke. A provider that
+    publishes no catalog leaves nothing to adopt, so that case still asks.
+
+    Returns
+    -------
+    str | None
+        The model to start with, or None when the user cancelled.
+
+    """
+    if models:
+        writer(f"  Starting with {models[0]}. Use /models to change it.")
+        return checked_model(models[0])
+    writer("  This endpoint advertises no models, so name one it accepts.")
+    return _asked(reader, writer, "Model: ", checked_model)
+
+
 def configure_interactively(
     reader: Callable[[str], str],
     secret_reader: Callable[[str], str],
@@ -227,7 +233,7 @@ def configure_interactively(
 ) -> Profile | None:
     """Ask for one provider identity, verify it, and store it as the active one.
 
-    Each answer is checked with the same rule the exported variable obeys, so a
+    Each answer is checked with the same rule its exported variable obeys, so a
     typo is refused at the prompt rather than at the first request. The token is
     read without echoing it.
 
@@ -238,10 +244,7 @@ def configure_interactively(
 
     """
     writer("RayChat is not configured yet.")
-    writer("Answer three questions, or press Enter alone to cancel.")
-    nickname = _asked(reader, writer, "Name for this configuration: ", checked_nickname)
-    if nickname is None:
-        return None
+    writer("Answer a few questions, or press Enter alone to cancel.")
     base_url = _asked(
         reader,
         writer,
@@ -258,14 +261,27 @@ def configure_interactively(
         if not refused:
             break
         writer("  Enter it again, or press Enter alone to cancel.")
-    model = _offered(writer, reader, models)
+    model = _initial_model(writer, reader, models)
     if model is None:
+        return None
+    role = _asked(
+        reader,
+        writer,
+        _role_prompt(),
+        checked_instruction_role,
+        default=SETTINGS.chat.instruction_role,
+    )
+    if role is None:
+        return None
+    nickname = _asked(reader, writer, "Name for this configuration: ", checked_nickname)
+    if nickname is None:
         return None
     profile = Profile(
         nickname=nickname,
         auth_token=auth_token,
         model=model,
         base_url=base_url,
+        instruction_role=role,
     )
     save_profile(profile)
     save_user_info(UserInfo(active_profile=nickname))

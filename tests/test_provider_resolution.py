@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import tempfile
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from raychat.configuration import SETTINGS
 from raychat.provider_resolution import (
     IGNORE_PROFILES_VARIABLE,
     SUPPLIED_VARIABLE,
@@ -201,6 +203,25 @@ class ResolutionTests(TypedTestCase):
         self.equal(environ, {})
         with self.rejected(ValueError, "RAYCHAT_AUTH_TOKEN"):
             provider_settings(environ)
+
+    def test_the_stored_context_role_is_exported_for_the_agent(self) -> None:
+        """A provider that refuses a system role needs that recorded, not retyped."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = _Home(directory)
+            home.store(replace(_complete(), instruction_role="user"))
+            environ: dict[str, str] = {}
+            home.apply(environ)
+            self.equal(environ.get(SETTINGS.chat.environment.instruction_role), "user")
+
+    def test_an_exported_context_role_still_wins(self) -> None:
+        """The shell keeps control of this exactly as it does of the identity."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = _Home(directory)
+            home.store(replace(_complete(), instruction_role="user"))
+            name = SETTINGS.chat.environment.instruction_role
+            environ = {name: "developer"}
+            home.apply(environ)
+            self.equal(environ[name], "developer")
 
     def test_the_selected_profile_is_reported_for_display(self) -> None:
         """A command showing the current configuration needs the name, not the file."""

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from raychat.configuration import SETTINGS
+
 from .provider_settings import (
     BASE_URL_VARIABLE,
     CREDENTIAL_VARIABLE,
@@ -96,6 +98,7 @@ def apply_stored_identity(
         MODEL_VARIABLE: profile.model,
         BASE_URL_VARIABLE: profile.base_url,
     }
+    _apply_instruction_role(environ, profile)
     supplied = [name for name in missing if stored[name] is not None]
     for name in supplied:
         value = stored[name]
@@ -108,6 +111,23 @@ def apply_stored_identity(
         # would override it.
         environ[SUPPLIED_VARIABLE] = ",".join(supplied)
     return profile
+
+
+def _apply_instruction_role(
+    environ: MutableMapping[str, str],
+    profile: Profile,
+) -> None:
+    """Export the role the provider needs its instructions to carry.
+
+    The variable already feeds the --instruction-role default, so a profile can
+    record a provider that refuses a system role without any new wiring. An
+    exported value still wins, exactly as it does for the three identity
+    variables.
+    """
+    name = SETTINGS.chat.environment.instruction_role
+    if profile.instruction_role is None or environ.get(name, "").strip():
+        return
+    environ[name] = profile.instruction_role
 
 
 def supplied_by_profile(environ: Mapping[str, str], name: str) -> bool:

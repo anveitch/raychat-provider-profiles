@@ -32,7 +32,7 @@ _SLUG_EXTRA = "-_"
 _POINTER_FIELDS = ("schema_version",)
 _POINTER_OPTIONAL = ("active_profile",)
 _PROFILE_FIELDS = ("schema_version", "nickname")
-_PROFILE_OPTIONAL = ("auth_token", "model", "base_url")
+_PROFILE_OPTIONAL = ("auth_token", "model", "base_url", "instruction_role")
 # Windows refuses these names with any extension, on every drive.
 _RESERVED_SLUGS = frozenset({
     "con",
@@ -58,6 +58,7 @@ class Profile:
     auth_token: str | None = field(default=None, repr=False)
     model: str | None = None
     base_url: str | None = None
+    instruction_role: str | None = None
 
     @property
     def slug(self) -> str:
@@ -104,6 +105,31 @@ def checked_nickname(value: str, source: str = "nickname") -> str:
         message = f"{source} must be at most {MAX_NICKNAME_CHARS} characters."
         raise ValueError(message)
     return nickname
+
+
+def checked_instruction_role(value: str, source: str = "instruction_role") -> str:
+    """Check the message role this provider expects its instructions to carry.
+
+    Some providers reject a system role outright and require the same text as a
+    user message, so this is a property of the provider rather than a taste.
+
+    Returns
+    -------
+    str
+        The role, without surrounding whitespace.
+
+    Raises
+    ------
+    ValueError
+        If the role is not one the configuration permits.
+
+    """
+    role = value.strip().casefold()
+    allowed = SETTINGS.chat.instruction_roles
+    if role not in allowed:
+        message = f"{source} must be one of: {', '.join(allowed)}."
+        raise ValueError(message)
+    return role
 
 
 def profile_slug(nickname: str) -> str:
@@ -408,6 +434,12 @@ def load_profile(path: Path) -> Profile | None:
             ),
             model=_optional_value(fields, filename, "model", checked_model),
             base_url=_optional_value(fields, filename, "base_url", checked_base_url),
+            instruction_role=_optional_value(
+                fields,
+                filename,
+                "instruction_role",
+                checked_instruction_role,
+            ),
         )
     except ConfigurationError as exc:
         raise ValueError(str(exc)) from exc
@@ -444,4 +476,9 @@ def save_profile(profile: Profile, path: Path | None = None) -> Path:
         payload["model"] = checked_model(profile.model, "model")
     if profile.base_url is not None:
         payload["base_url"] = checked_base_url(profile.base_url, "base_url")
+    if profile.instruction_role is not None:
+        payload["instruction_role"] = checked_instruction_role(
+            profile.instruction_role,
+            "instruction_role",
+        )
     return replace_document(target, payload)
