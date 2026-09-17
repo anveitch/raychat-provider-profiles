@@ -14,6 +14,8 @@ from raychat.user_info import (
     SCHEMA_VERSION,
     Profile,
     UserInfo,
+    environment_file,
+    environment_text,
     load_profile,
     load_user_info,
     profile_slug,
@@ -161,7 +163,12 @@ class ProfileStorageTests(TypedTestCase):
                 self.fail("Expected the saved profile to load.")
             else:
                 self.equal(stored.model, "vendor/second")
-            self.equal([item.name for item in Path(directory).iterdir()], ["work.json"])
+            # The profile and its sourceable companion, and nothing else: an
+            # interrupted write must leave no temporary file behind.
+            self.equal(
+                sorted(item.name for item in Path(directory).iterdir()),
+                ["work.env", "work.json"],
+            )
 
     def test_an_invalid_value_is_rejected_before_the_previous_file_changes(
         self,
@@ -187,6 +194,105 @@ class ProfileStorageTests(TypedTestCase):
             save_profile(Profile(nickname="Home"), folder / "home.json")
             (folder / "notes.txt").write_text("ignored", encoding="utf-8")
             self.equal(stored_profile_slugs(folder), ("home", "work"))
+
+
+class ProfileEnvironmentTests(TypedTestCase):
+    """A profile carries its own settings and a file a shell can source."""
+
+    def test_extra_variables_round_trip(self) -> None:
+        """Profiles differ by more than identity, so they carry their settings."""
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "work.json"
+            save_profile(
+                Profile(
+                    nickname="Work",
+                    environment={"HTTPS_PROXY": "http://proxy.example:3128"},
+                ),
+                target,
+            )
+            stored = load_profile(target)
+            if stored is None:
+                self.fail("Expected the profile to load.")
+            else:
+                self.equal(
+                    dict(stored.environment),
+                    {"HTTPS_PROXY": "http://proxy.example:3128"},
+                )
+
+    def test_identity_variables_are_refused_in_the_extra_block(self) -> None:
+        """Two definitions of one value would leave no answer to which applies."""
+        for name in ("RAYCHAT_AUTH_TOKEN", "RAYCHAT_MODEL", "RAYCHAT_BASE_URL"):
+            with (
+                self.subTest(name=name),
+                tempfile.TemporaryDirectory() as directory,
+                self.rejected(ValueError, "managed|remove it here"),
+            ):
+                save_profile(
+                    Profile(nickname="Work", environment={name: "x"}),
+                    Path(directory) / "work.json",
+                )
+
+    def test_invalid_variable_names_are_refused(self) -> None:
+        """A name a shell cannot export would silently never apply."""
+        for name in ("1BAD", "has-dash", "has space", ""):
+            with (
+                self.subTest(name=name),
+                tempfile.TemporaryDirectory() as directory,
+                self.rejected(ValueError),
+            ):
+                save_profile(
+                    Profile(nickname="Work", environment={name: "x"}),
+                    Path(directory) / "work.json",
+                )
+
+    def test_a_sourceable_file_is_written_beside_the_profile(self) -> None:
+        """The pair is what ties a profile to the environment it represents."""
+        with tempfile.TemporaryDirectory() as directory:
+            target = Path(directory) / "work.json"
+            saved = save_profile(
+                Profile(
+                    nickname="Work",
+                    auth_token=_FIXTURE_CREDENTIAL,
+                    model="vendor/m",
+                    base_url=_FIXTURE_URL,
+                    instruction_role="user",
+                    environment={"HTTPS_PROXY": "http://proxy.example:3128"},
+                ),
+                target,
+            )
+            companion = environment_file(saved)
+            self.require(companion.is_file())
+            if os.name == "posix":
+                self.equal(stat.S_IMODE(companion.stat().st_mode), 0o600)
+            text = companion.read_text(encoding="utf-8")
+            for expected in (
+                f"RAYCHAT_AUTH_TOKEN='{_FIXTURE_CREDENTIAL}'",
+                "RAYCHAT_MODEL='vendor/m'",
+                f"RAYCHAT_BASE_URL='{_FIXTURE_URL}'",
+                "LLM_INSTRUCTION_ROLE='user'",
+                "HTTPS_PROXY='http://proxy.example:3128'",
+            ):
+                self.require(expected in text, f"Expected {expected!r} in the file.")
+
+    def test_values_are_quoted_so_a_shell_reproduces_them_verbatim(self) -> None:
+        """A credential is arbitrary text; quoting it wrongly loses it or runs it.
+
+        These are the POSIX single-quote forms: a quote ends the run, an escaped
+        quote is contributed, and a new run opens. Everything else, including a
+        command substitution, stays literal inside single quotes.
+        """
+        for token, expected in (
+            ("plain", "RAYCHAT_AUTH_TOKEN='plain'"),
+            ("with'quote", "RAYCHAT_AUTH_TOKEN='with'\\''quote'"),
+            ("with $(whoami)", "RAYCHAT_AUTH_TOKEN='with $(whoami)'"),
+            ('with "double"', "RAYCHAT_AUTH_TOKEN='with \"double\"'"),
+        ):
+            with self.subTest(token=token):
+                rendered = environment_text(Profile(nickname="Work", auth_token=token))
+                self.require(
+                    expected in rendered,
+                    f"Expected {expected!r} in {rendered!r}.",
+                )
 
 
 class ActiveProfileTests(TypedTestCase):

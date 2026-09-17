@@ -5,17 +5,26 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+import re
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 from raychat.configuration import SETTINGS
 
-from .provider_settings import checked_auth_token, checked_base_url, checked_model
+from .provider_settings import (
+    BASE_URL_VARIABLE,
+    CREDENTIAL_VARIABLE,
+    MODEL_VARIABLE,
+    checked_auth_token,
+    checked_base_url,
+    checked_model,
+)
 from .validation import (
     ConfigurationError,
+    configuration_fields,
     integer_field,
     json_object,
     settings_fields,
@@ -32,7 +41,19 @@ _SLUG_EXTRA = "-_"
 _POINTER_FIELDS = ("schema_version",)
 _POINTER_OPTIONAL = ("active_profile",)
 _PROFILE_FIELDS = ("schema_version", "nickname")
-_PROFILE_OPTIONAL = ("auth_token", "model", "base_url", "instruction_role")
+_PROFILE_OPTIONAL = (
+    "auth_token",
+    "model",
+    "base_url",
+    "instruction_role",
+    "environment",
+)
+_ENVIRONMENT_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_MANAGED_VARIABLES = frozenset({
+    CREDENTIAL_VARIABLE,
+    MODEL_VARIABLE,
+    BASE_URL_VARIABLE,
+})
 # Windows refuses these names with any extension, on every drive.
 _RESERVED_SLUGS = frozenset({
     "con",
@@ -59,6 +80,7 @@ class Profile:
     model: str | None = None
     base_url: str | None = None
     instruction_role: str | None = None
+    environment: Mapping[str, str] = field(default_factory=dict)
 
     @property
     def slug(self) -> str:
@@ -130,6 +152,87 @@ def checked_instruction_role(value: str, source: str = "instruction_role") -> st
         message = f"{source} must be one of: {', '.join(allowed)}."
         raise ValueError(message)
     return role
+
+
+def checked_environment(value: object, source: str = "environment") -> dict[str, str]:
+    """Check extra variables a profile exports beside the provider identity.
+
+    Any valid variable name is accepted, because a deployment may need a proxy
+    or tenant setting RayChat knows nothing about. The three identity variables
+    are refused: they are managed fields, and allowing a second definition here
+    would leave two answers to the same question.
+
+    Returns
+    -------
+    dict[str, str]
+        The checked variables, detached from the caller's mapping.
+
+    Raises
+    ------
+    ValueError
+        If a name is not a valid variable, or names a managed identity value.
+
+    """
+    fields = configuration_fields(value, source)
+    checked: dict[str, str] = {}
+    for name in sorted(fields):
+        if _ENVIRONMENT_NAME.fullmatch(name) is None:
+            message = f"{source}.{name} is not a valid environment variable name."
+            raise ValueError(message)
+        if name in _MANAGED_VARIABLES:
+            message = (
+                f"{source}.{name} is set from the profile's own fields; remove it here."
+            )
+            raise ValueError(message)
+        checked[name] = text_field(fields[name], f"{source}.{name}", allow_empty=True)
+    return checked
+
+
+def environment_file(path: Path) -> Path:
+    """Locate the shell-sourceable file written beside one stored profile.
+
+    Returns
+    -------
+    Path
+        The same name with a .env suffix.
+
+    """
+    return path.with_suffix(".env")
+
+
+def _quoted(value: str) -> str:
+    # Single quotes protect everything except a single quote, which has to end
+    # the run, contribute an escaped one, and open a new run.
+    return "'" + value.replace("'", r"'\''") + "'"
+
+
+def environment_text(profile: Profile) -> str:
+    """Render one profile as a file a shell can source.
+
+    Returns
+    -------
+    str
+        Assignments for the identity, the context role and every extra
+        variable, in a stable order.
+
+    """
+    values: dict[str, str] = {}
+    if profile.auth_token is not None:
+        values[CREDENTIAL_VARIABLE] = profile.auth_token
+    if profile.model is not None:
+        values[MODEL_VARIABLE] = profile.model
+    if profile.base_url is not None:
+        values[BASE_URL_VARIABLE] = profile.base_url
+    if profile.instruction_role is not None:
+        values[SETTINGS.chat.environment.instruction_role] = profile.instruction_role
+    values.update(profile.environment)
+    lines = [
+        f"# RayChat profile {profile.nickname!r}. Written by RayChat; edits are",
+        "# replaced whenever the profile is saved. Load with:",
+        "#   set -a; . ./THIS_FILE; set +a",
+    ]
+    lines.extend(f"{name}={_quoted(values[name])}" for name in sorted(values))
+    return "\n".join(lines) + "\n"
 
 
 def profile_slug(nickname: str) -> str:
@@ -440,6 +543,10 @@ def load_profile(path: Path) -> Profile | None:
                 "instruction_role",
                 checked_instruction_role,
             ),
+            environment=checked_environment(
+                fields.get("environment", {}),
+                _field_label(filename, "environment"),
+            ),
         )
     except ConfigurationError as exc:
         raise ValueError(str(exc)) from exc
@@ -481,4 +588,31 @@ def save_profile(profile: Profile, path: Path | None = None) -> Path:
             profile.instruction_role,
             "instruction_role",
         )
-    return replace_document(target, payload)
+    extra = checked_environment(dict(profile.environment))
+    if extra:
+        payload["environment"] = extra
+    written = replace_document(target, payload)
+    _replace_environment_file(written, replace(profile, environment=extra))
+    return written
+
+
+def _replace_environment_file(path: Path, profile: Profile) -> None:
+    companion = environment_file(path)
+    raw = environment_text(profile).encode("utf-8")
+    descriptor, temporary_name = tempfile.mkstemp(
+        prefix=f".{companion.name}.",
+        suffix=".tmp",
+        dir=str(companion.parent),
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        if os.name == "posix":
+            temporary.chmod(SETTINGS.storage.file_mode)
+        temporary.replace(companion)
+    finally:
+        with contextlib.suppress(FileNotFoundError):
+            temporary.unlink()
