@@ -8,6 +8,7 @@ import http.client
 import io
 import json
 import math
+import os
 import re
 import tempfile
 from email.message import Message
@@ -18,9 +19,18 @@ from urllib.error import HTTPError, URLError
 
 from raychat.configuration import SETTINGS
 from raychat.event_types import SESSION_RESET, SESSION_RESTORE, Lifecycle
+from raychat.provider_resolution import SUPPLIED_VARIABLE
 from raychat.resources import create_resources, create_worker
 from raychat.sdk import HTTP_PROVIDER, ProviderError
 from raychat.service_contracts import CHAT, ExportedProvider
+from raychat.user_info import (
+    Profile,
+    UserInfo,
+    load_profile,
+    profile_path,
+    save_profile,
+    save_user_info,
+)
 from raychat.validation import json_object, text_field
 from tests.assertions import TypedTestCase
 from tests.plugin_support import (
@@ -80,6 +90,14 @@ class ProviderTestCase(TypedTestCase):
         raise AssertionError(message)
 
 
+_DISCOVERY_CREDENTIAL = "synthetic-discovery-token"
+
+
+def _restore_environment(saved: dict[str, str]) -> None:
+    os.environ.clear()
+    os.environ.update(saved)
+
+
 class ChatAPITests(ProviderTestCase):
     """Check endpoint validation, request bytes and bounded completion responses."""
 
@@ -106,6 +124,93 @@ class ChatAPITests(ProviderTestCase):
         self.equal(client.api_key, "synthetic-canonical-token")
         self.equal(argument_fields(args)["model"], "canonical-model")
 
+    def _selection_notices(
+        self,
+        directory: str,
+        environ: dict[str, str],
+    ) -> list[str]:
+        args = arguments(["--workspace", directory, "--no-memory"])
+        # A real launch resolves into os.environ itself, so mirror that here.
+        self.addCleanup(_restore_environment, dict(os.environ))
+        os.environ.clear()
+        os.environ.update(environ)
+        resources = create_resources(args, environ)
+        self.addCleanup(resources.close)
+        runtime = resources.runtime
+        runtime.state.setdefault("chat_completions", {})["models"] = [
+            "original",
+            "beta",
+        ]
+        notices: list[str] = []
+
+        def notify(kind: str, payload: Mapping[str, object]) -> None:
+            if kind == "notification":
+                notices.append(text_field(payload["message"], "notification"))
+
+        runtime.select_menu("models", "beta", notify=notify)
+        return notices
+
+    def test_selecting_a_model_stores_it_on_the_active_profile(self) -> None:
+        """A chosen model must survive the session that chose it."""
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(Path, "home", return_value=Path(directory)),
+        ):
+            save_profile(
+                Profile(
+                    nickname="Work",
+                    auth_token=_DISCOVERY_CREDENTIAL,
+                    model="original",
+                    base_url="https://fixture-provider.invalid/v1",
+                ),
+            )
+            save_user_info(UserInfo(active_profile="Work"))
+            notices = self._selection_notices(
+                directory,
+                {
+                    "RAYCHAT_AUTH_TOKEN": _DISCOVERY_CREDENTIAL,
+                    "RAYCHAT_MODEL": "original",
+                    "RAYCHAT_BASE_URL": "https://fixture-provider.invalid/v1",
+                    SUPPLIED_VARIABLE: "RAYCHAT_MODEL",
+                },
+            )
+            stored = load_profile(profile_path("Work"))
+            if stored is None:
+                self.fail("Expected the profile to remain readable.")
+            else:
+                self.equal(stored.model, "beta")
+            self.equal(notices, ["Saved beta to 'Work'. Restart RayChat to use it."])
+
+    def test_selecting_a_model_refuses_to_fight_an_exported_variable(self) -> None:
+        """Writing a value the environment already overrides would mislead."""
+        with (
+            tempfile.TemporaryDirectory() as directory,
+            mock.patch.object(Path, "home", return_value=Path(directory)),
+        ):
+            save_profile(
+                Profile(
+                    nickname="Work",
+                    auth_token=_DISCOVERY_CREDENTIAL,
+                    model="original",
+                    base_url="https://fixture-provider.invalid/v1",
+                ),
+            )
+            save_user_info(UserInfo(active_profile="Work"))
+            notices = self._selection_notices(
+                directory,
+                {
+                    "RAYCHAT_AUTH_TOKEN": _DISCOVERY_CREDENTIAL,
+                    "RAYCHAT_MODEL": "exported",
+                    "RAYCHAT_BASE_URL": "https://fixture-provider.invalid/v1",
+                },
+            )
+            stored = load_profile(profile_path("Work"))
+            if stored is None:
+                self.fail("Expected the profile to remain readable.")
+            else:
+                self.equal(stored.model, "original")
+            self.require("would not take effect" in notices[0])
+
     def test_model_discovery_cannot_override_environment_or_restored_identity(
         self,
     ) -> None:
@@ -122,7 +227,7 @@ class ChatAPITests(ProviderTestCase):
             resources = create_resources(
                 args,
                 {
-                    "RAYCHAT_AUTH_TOKEN": "synthetic-discovery-token",
+                    "RAYCHAT_AUTH_TOKEN": _DISCOVERY_CREDENTIAL,
                     "RAYCHAT_MODEL": "original",
                     "RAYCHAT_BASE_URL": "https://fixture-provider.invalid/v1",
                 },
@@ -152,7 +257,12 @@ class ChatAPITests(ProviderTestCase):
             self.require("model" not in runtime.state["chat_completions"])
             self.equal(
                 notices,
-                ["Set RAYCHAT_MODEL to beta and restart RayChat to use it."],
+                [
+                    (
+                        "No stored profile to update. Set RAYCHAT_MODEL to beta "
+                        "and restart RayChat to use it."
+                    ),
+                ],
             )
             if resources.store is None:
                 self.fail("The fixture requires a session journal.")

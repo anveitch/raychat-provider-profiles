@@ -12,12 +12,13 @@ from .provider_settings import (
 from .user_info import load_profile, load_user_info, profiles_directory
 
 if TYPE_CHECKING:
-    from collections.abc import MutableMapping
+    from collections.abc import Mapping, MutableMapping
     from pathlib import Path
 
     from .user_info import Profile
 
 IGNORE_PROFILES_VARIABLE = "RAYCHAT_IGNORE_PROFILES"
+SUPPLIED_VARIABLE = "RAYCHAT_PROFILE_SUPPLIED"
 _REQUIRED = (CREDENTIAL_VARIABLE, MODEL_VARIABLE, BASE_URL_VARIABLE)
 
 
@@ -87,8 +88,28 @@ def apply_stored_identity(
         MODEL_VARIABLE: profile.model,
         BASE_URL_VARIABLE: profile.base_url,
     }
-    for name in missing:
+    supplied = [name for name in missing if stored[name] is not None]
+    for name in supplied:
         value = stored[name]
         if value is not None:
             environ[name] = value
+    if supplied:
+        # Record which values came from the profile. Once they sit in the
+        # environment they are indistinguishable from exported ones, and a
+        # caller offering to change a stored value must know whether an export
+        # would override it.
+        environ[SUPPLIED_VARIABLE] = ",".join(supplied)
     return profile
+
+
+def supplied_by_profile(environ: Mapping[str, str], name: str) -> bool:
+    """Report whether one provider variable came from the profile, not the shell.
+
+    Returns
+    -------
+    bool
+        True when resolution supplied this variable, so changing the stored
+        value will take effect; False when an export owns it and would win.
+
+    """
+    return name in environ.get(SUPPLIED_VARIABLE, "").split(",")

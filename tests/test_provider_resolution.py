@@ -7,8 +7,10 @@ from pathlib import Path
 
 from raychat.provider_resolution import (
     IGNORE_PROFILES_VARIABLE,
+    SUPPLIED_VARIABLE,
     active_profile,
     apply_stored_identity,
+    supplied_by_profile,
 )
 from raychat.provider_settings import provider_settings
 from raychat.user_info import Profile, UserInfo, save_profile, save_user_info
@@ -18,6 +20,11 @@ from tests.environment_support import provider_environment
 _STORED_URL = "https://stored-provider.example/v1"
 _STORED_CREDENTIAL = "stored-token"
 _STORED_MODEL = "vendor/stored-model"
+_VARIABLE_NAMES = (
+    "RAYCHAT_AUTH_TOKEN",
+    "RAYCHAT_MODEL",
+    "RAYCHAT_BASE_URL",
+)
 
 
 class _Home:
@@ -110,7 +117,9 @@ class ResolutionTests(TypedTestCase):
             home.store(Profile(nickname="Work", model=_STORED_MODEL))
             environ: dict[str, str] = {}
             home.apply(environ)
-            self.equal(environ, {"RAYCHAT_MODEL": _STORED_MODEL})
+            self.equal(environ.get("RAYCHAT_MODEL"), _STORED_MODEL)
+            self.equal(environ.get("RAYCHAT_AUTH_TOKEN"), None)
+            self.equal(environ.get("RAYCHAT_BASE_URL"), None)
             with self.rejected(ValueError, "RAYCHAT_AUTH_TOKEN"):
                 provider_settings(environ)
 
@@ -146,6 +155,29 @@ class ResolutionTests(TypedTestCase):
             environ = {IGNORE_PROFILES_VARIABLE: "1"}
             self.equal(home.apply(environ), None)
             self.equal(environ, {IGNORE_PROFILES_VARIABLE: "1"})
+
+    def test_supplied_values_are_distinguishable_from_exported_ones(self) -> None:
+        """Once resolved they look alike, yet only one of them can be changed."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = _Home(directory)
+            home.store(_complete())
+            environ = {"RAYCHAT_MODEL": "exported-model"}
+            home.apply(environ)
+            # The shell owns the model; the profile supplied the rest.
+            self.require(not supplied_by_profile(environ, "RAYCHAT_MODEL"))
+            self.require(supplied_by_profile(environ, "RAYCHAT_AUTH_TOKEN"))
+            self.require(supplied_by_profile(environ, "RAYCHAT_BASE_URL"))
+
+    def test_a_fully_exported_environment_records_no_supplied_values(self) -> None:
+        """Nothing was taken from disk, so nothing may claim it can be changed."""
+        with tempfile.TemporaryDirectory() as directory:
+            home = _Home(directory)
+            home.store(_complete())
+            environ = provider_environment()
+            home.apply(environ)
+            self.equal(environ.get(SUPPLIED_VARIABLE), None)
+            for name in _VARIABLE_NAMES:
+                self.require(not supplied_by_profile(environ, name))
 
     def test_the_selected_profile_is_reported_for_display(self) -> None:
         """A command showing the current configuration needs the name, not the file."""
