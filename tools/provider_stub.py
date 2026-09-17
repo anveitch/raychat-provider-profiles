@@ -7,6 +7,7 @@ import json
 import secrets
 import sys
 import time
+from dataclasses import dataclass
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import TYPE_CHECKING, ClassVar
@@ -35,6 +36,7 @@ class _Arguments(argparse.Namespace):
     token: str
     models: str
     hide_catalog: bool
+    prose: bool
 
 
 def _write(line: str) -> None:
@@ -88,11 +90,15 @@ def _request_body(declared: str, stream: BufferedIOBase) -> bytes:
     return stream.read(size)
 
 
-def _completion_body(model: str, prompt: str) -> dict[str, object]:
-    answer = (
+def _completion_body(model: str, prompt: str, *, action: bool) -> dict[str, object]:
+    spoken = (
         f"This is the local provider stub answering as {model}. You said {prompt!r}."
     )
-    asked, replied = len(prompt.split()), len(answer.split())
+    # RayChat drives an agent loop that expects one JSON action per reply, so the
+    # default answer finishes the turn. Plain prose exercises a bare client.
+    finished: dict[str, object] = {"action": "done", "message": spoken}
+    answer = json.dumps(finished) if action else spoken
+    asked, replied = len(prompt.split()), len(spoken.split())
     return {
         "id": "chatcmpl-" + secrets.token_hex(12),
         "object": "chat.completion",
@@ -123,6 +129,7 @@ class StubHandler(BaseHTTPRequestHandler):
     chat_path: ClassVar[str] = "/v1/chat/completions"
     hide_catalog: ClassVar[bool] = False
     quiet: ClassVar[bool] = False
+    action_replies: ClassVar[bool] = True
     answered: int = 0
 
     @override
@@ -189,17 +196,25 @@ class StubHandler(BaseHTTPRequestHandler):
                 _error(str(exc), "invalid_request"),
             )
             return
-        self.reply(HTTPStatus.OK, _completion_body(model, prompt))
+        self.reply(
+            HTTPStatus.OK,
+            _completion_body(model, prompt, action=self.action_replies),
+        )
 
 
-def handler(
-    models: Sequence[str],
-    token: str,
-    prefix: str,
-    *,
-    hide: bool,
-    silent: bool = False,
-) -> type[BaseHTTPRequestHandler]:
+@dataclass(frozen=True, kw_only=True)
+class StubConfig:
+    """Everything one stub instance serves, chosen by its caller."""
+
+    models: Sequence[str]
+    token: str
+    prefix: str = "/v1"
+    hide: bool = False
+    silent: bool = False
+    prose: bool = False
+
+
+def handler(config: StubConfig) -> type[BaseHTTPRequestHandler]:
     """Bind one catalog, credential and route prefix to a handler class.
 
     Returns
@@ -210,12 +225,13 @@ def handler(
     """
 
     class Handler(StubHandler):
-        catalog = tuple(models)
-        credential = token
-        catalog_path = prefix + "/models"
-        chat_path = prefix + "/chat/completions"
-        hide_catalog = hide
-        quiet = silent
+        catalog = tuple(config.models)
+        credential = config.token
+        catalog_path = config.prefix + "/models"
+        chat_path = config.prefix + "/chat/completions"
+        hide_catalog = config.hide
+        quiet = config.silent
+        action_replies = not config.prose
 
     return Handler
 
@@ -226,10 +242,13 @@ def serve(arguments: _Arguments) -> None:
     server = ThreadingHTTPServer(
         (arguments.host, arguments.port),
         handler(
-            models,
-            arguments.token,
-            arguments.prefix,
-            hide=arguments.hide_catalog,
+            StubConfig(
+                models=models,
+                token=arguments.token,
+                prefix=arguments.prefix,
+                hide=arguments.hide_catalog,
+                prose=arguments.prose,
+            ),
         ),
     )
     base = f"http://{arguments.host}:{server.server_port}{arguments.prefix}"
@@ -239,6 +258,7 @@ def serve(arguments: _Arguments) -> None:
     _write(f"  RAYCHAT_MODEL={models[0] if models else '<none advertised>'}")
     _write(f"  catalog: {'404 (bare server)' if arguments.hide_catalog else 'served'}")
     _write(f"  models : {', '.join(models) if models else '(empty)'}")
+    _write(f"  replies: {'plain prose' if arguments.prose else 'JSON action'}")
     _write("Press Ctrl-C to stop.")
     try:
         server.serve_forever()
@@ -261,6 +281,11 @@ def main() -> None:
         "--hide-catalog",
         action="store_true",
         help="Answer 404 for the model catalog, as a bare server would.",
+    )
+    parser.add_argument(
+        "--prose",
+        action="store_true",
+        help="Answer with plain text instead of one RayChat JSON action.",
     )
     arguments = _Arguments()
     parser.parse_args(namespace=arguments)

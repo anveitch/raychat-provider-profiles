@@ -13,7 +13,7 @@ from unittest import mock
 from raychat.first_run import configure_interactively, fetch_models
 from raychat.user_info import load_profile, load_user_info, profile_path, user_info_path
 from tests.assertions import TypedTestCase
-from tools.provider_stub import handler
+from tools.provider_stub import StubConfig, handler
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Sequence
@@ -70,7 +70,14 @@ class _Answers:
 def _served(*, hide_catalog: bool = False) -> Iterator[str]:
     server = ThreadingHTTPServer(
         ("127.0.0.1", 0),
-        handler(_CATALOG, _CREDENTIAL, "/v1", hide=hide_catalog, silent=True),
+        handler(
+            StubConfig(
+                models=_CATALOG,
+                token=_CREDENTIAL,
+                hide=hide_catalog,
+                silent=True,
+            ),
+        ),
     )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
