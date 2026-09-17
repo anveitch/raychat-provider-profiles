@@ -209,8 +209,9 @@ def _initial_model(
 
     The model is not asked for here on purpose: the catalog is only known after
     the endpoint answers, and choosing from it belongs in the application where
-    the whole list is visible and switching is one keystroke. A provider that
-    publishes no catalog leaves nothing to adopt, so that case still asks.
+    the whole list is visible and switching is one keystroke. The last entry the
+    endpoint advertised is adopted to start from. A provider that publishes no
+    catalog leaves nothing to adopt, so that case still asks.
 
     Returns
     -------
@@ -219,8 +220,11 @@ def _initial_model(
 
     """
     if models:
-        writer(f"  Starting with {models[0]}. Use /models to change it.")
-        return checked_model(models[0])
+        # The last entry the endpoint advertised. Which one is arbitrary: this
+        # is a value to start from, not a recommendation, and /models replaces
+        # it once the whole list is visible.
+        writer(f"  Starting with {models[-1]}. Use /models to change it.")
+        return checked_model(models[-1])
     writer("  This endpoint advertises no models, so name one it accepts.")
     return _asked(reader, writer, "Model: ", checked_model)
 

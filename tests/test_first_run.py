@@ -140,7 +140,7 @@ class InteractiveSetupTests(TypedTestCase):
                 self.equal(stored.instruction_role, "user")
 
     def test_the_model_is_adopted_from_discovery_without_being_asked(self) -> None:
-        """Choosing a model belongs in the application, where the list is visible."""
+        """The last advertised model starts the session; the menu replaces it."""
         with (
             tempfile.TemporaryDirectory() as home,
             _served() as base,
@@ -155,7 +155,7 @@ class InteractiveSetupTests(TypedTestCase):
             if profile is None:
                 self.fail("Expected setup to complete.")
             else:
-                self.equal(profile.model, _CATALOG[0])
+                self.equal(profile.model, _CATALOG[-1])
             prompts = " ".join(answers.prompts).casefold()
             self.require("model" not in prompts, "Setup must not ask for a model.")
             self.require("/models" in answers.transcript())
