@@ -80,7 +80,15 @@ def apply_stored_identity(
     missing = [name for name in _REQUIRED if not environ.get(name, "").strip()]
     if not missing:
         return None
-    profile = active_profile(pointer, directory)
+    try:
+        profile = active_profile(pointer, directory)
+    except RuntimeError:
+        # With no resolvable home directory there is nowhere a profile could
+        # have been stored, so the environment is the only source and the
+        # ordinary missing-variable error is the right answer. Windows raises
+        # this whenever USERPROFILE and HOMEDRIVE/HOMEPATH are all absent,
+        # which POSIX does not, because it falls back to the password database.
+        return None
     if profile is None:
         return None
     stored = {

@@ -511,7 +511,7 @@ def main(
         try:
             apply_stored_identity(os.environ)
             _offer_first_run(arguments, os.environ)
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, RuntimeError) as exc:
             sys.stderr.write("Error: " + str(exc) + "\n")
             return 1
     preflight = _provider_preflight(arguments, environ)

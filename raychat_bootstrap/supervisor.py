@@ -1016,7 +1016,7 @@ def main() -> int:
     try:
         apply_stored_identity(os.environ)
         provider_settings(os.environ)
-    except (ValueError, OSError) as error:
+    except (ValueError, OSError, RuntimeError) as error:
         sys.stderr.write("Error: " + str(error) + "\n")
         return 1
     operator_home = Path.home() / SETTINGS.storage.home_directory

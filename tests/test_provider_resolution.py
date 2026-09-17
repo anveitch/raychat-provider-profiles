@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
+from unittest import mock
 
 from raychat.provider_resolution import (
     IGNORE_PROFILES_VARIABLE,
@@ -178,6 +179,28 @@ class ResolutionTests(TypedTestCase):
             self.equal(environ.get(SUPPLIED_VARIABLE), None)
             for name in _VARIABLE_NAMES:
                 self.require(not supplied_by_profile(environ, name))
+
+    def test_an_unresolvable_home_directory_falls_back_to_the_environment(
+        self,
+    ) -> None:
+        """Windows cannot name a home with its variables cleared; POSIX still can.
+
+        A process launched without USERPROFILE or HOMEDRIVE/HOMEPATH has nowhere
+        a profile could be stored, so resolution must leave the environment
+        alone and let the ordinary missing-variable error stand, rather than
+        failing startup with an error about the home directory.
+        """
+
+        def _no_home() -> Path:
+            message = "Could not determine home directory"
+            raise RuntimeError(message)
+
+        environ: dict[str, str] = {}
+        with mock.patch.object(Path, "home", _no_home):
+            self.equal(apply_stored_identity(environ), None)
+        self.equal(environ, {})
+        with self.rejected(ValueError, "RAYCHAT_AUTH_TOKEN"):
+            provider_settings(environ)
 
     def test_the_selected_profile_is_reported_for_display(self) -> None:
         """A command showing the current configuration needs the name, not the file."""

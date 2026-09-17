@@ -38,7 +38,7 @@ def _selected_profile() -> Profile | None:
     """
     try:
         return active_profile()
-    except (ValueError, OSError):
+    except (ValueError, OSError, RuntimeError):
         return None
 
 
@@ -157,7 +157,7 @@ class ModelMenu:
             path = catalog_path(profile.nickname)
             previous = load_catalog(path)
             save_catalog(discovered_catalog(profile.nickname, base_url, models))
-        except (ValueError, OSError):
+        except (ValueError, OSError, RuntimeError):
             # Discovery succeeded; failing to cache it must not fail the command.
             return ""
         known = previous.models if previous is not None else ()
@@ -209,7 +209,7 @@ class ModelMenu:
             return
         try:
             save_profile(replace(profile, model=identifier))
-        except (ValueError, OSError) as exc:
+        except (ValueError, OSError, RuntimeError) as exc:
             ctx.notify(f"Could not update {profile.nickname!r}: {exc}")
             return
         ctx.notify(
