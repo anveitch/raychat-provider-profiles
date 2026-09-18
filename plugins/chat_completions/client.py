@@ -45,6 +45,7 @@ from raychat.validation import (
     text_field,
 )
 
+from .catalog_watch import CatalogWatch
 from .configuration import load as load_settings
 from .configuration import validate
 from .models import ModelMenu
@@ -671,6 +672,7 @@ def register(api: PluginAPI) -> None:
     """Register the checked provider service and isolated worker factory."""
     models = ModelMenu(api)
     ProfileMenu(api)
+    CatalogWatch(api)
     api.register_worker("models", _models_worker)
     api.validate_settings(validate)
     source: object = api.context.plugin_sources([api.plugin_id])
