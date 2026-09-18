@@ -55,7 +55,7 @@
       "instructions": "Provides the configured HTTP chat model and isolated provider calls automatically. No model tool is needed to invoke it. Provider identity and authentication come only from RAYCHAT_AUTH_TOKEN, RAYCHAT_MODEL and RAYCHAT_BASE_URL. Operator launch options include --api-timeout and --request-options. Never expose provider credentials. The operator can use /models to discover model IDs; selecting one explains how to set RAYCHAT_MODEL and restart. Discovery never changes the active model.",
       "requires": {},
       "sdk": 4,
-      "sha256": "9cd80c2e0b339bcd903740e5124ee49b6592cb57cbf0f3d08fa5561fe522ab80",
+      "sha256": "79b6ab076f310f58bff495cbee6ecb88be45c15d93a9d963c697c51b7137bead",
       "url": "chat_completions-1.0.0.zip",
       "version": "1.0.0"
     },

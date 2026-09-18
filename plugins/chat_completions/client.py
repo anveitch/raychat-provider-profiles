@@ -48,6 +48,7 @@ from raychat.validation import (
 from .configuration import load as load_settings
 from .configuration import validate
 from .models import ModelMenu
+from .profiles import ProfileMenu
 
 if TYPE_CHECKING:
     import argparse
@@ -669,6 +670,7 @@ def _models_worker(options: Mapping[str, object], ctx: PluginContext) -> Chat:
 def register(api: PluginAPI) -> None:
     """Register the checked provider service and isolated worker factory."""
     models = ModelMenu(api)
+    ProfileMenu(api)
     api.register_worker("models", _models_worker)
     api.validate_settings(validate)
     source: object = api.context.plugin_sources([api.plugin_id])
