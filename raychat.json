@@ -306,6 +306,7 @@
       ".gitignore",
       "LICENSE",
       "README.md",
+      "docs/CONFIGURATION.md",
       "docs/LIVE_CORE.md",
       "docs/PLUGINS.md",
       "docs/RELEASE.md",

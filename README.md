@@ -10,6 +10,21 @@ Run it with Python 3.10 or newer. No third-party runtime packages are required.
 feature archives on first launch.
 
 ```bash
+python3 -B -S raychat.py --workspace ./workspace
+```
+
+The first launch asks for a server URL, an API token, the role instructions must
+carry, and a name for the configuration. It reads the provider's model catalog
+with the token given and starts from the last model advertised, so no model has
+to be known in advance. The answers are stored as a named configuration under
+`~/.raychat/profiles/`, readable only by its owner. See
+[configuration](docs/CONFIGURATION.md).
+
+Later launches list the stored configurations and ask which to use, offering to
+add another. `--profile NAME` selects one without asking. Exporting the provider
+variables still works and always wins:
+
+```bash
 export RAYCHAT_AUTH_TOKEN="your-api-token"
 export RAYCHAT_MODEL="your-model-id"
 export RAYCHAT_BASE_URL="https://provider.example/v1"
@@ -18,9 +33,13 @@ python3 -B -S raychat.py --workspace ./workspace
 
 Use `/models` in the TUI to fetch all model IDs from the configured provider's
 OpenAI-compatible `GET /models` endpoint. Type to filter; use arrows, Page Up/Down,
-Home/End, Enter, or click to inspect an ID. Escape closes the menu. To change the
-active model, set `RAYCHAT_MODEL` and restart RayChat. Saved sessions and profile
-settings cannot override it. Child chats, task evaluation, and optimization
+Home/End, Enter, or click to select an ID. Escape closes the menu. Selecting a
+model stores it on the active configuration and takes effect at the next launch;
+the running session keeps the identity its workers already inherited. When
+`RAYCHAT_MODEL` is exported it overrides the stored value, and the menu says so
+rather than recording a choice that would be ignored. `/profile` switches between
+stored configurations on the same terms. Saved sessions and plugin settings cannot
+override the provider identity. Child chats, task evaluation, and optimization
 reflection use the same endpoint, model, and token as the main chat.
 The `/system` panel wraps the complete model identifier onto multiple lines,
 including its provider path.
@@ -30,8 +49,12 @@ source inspection, live-update, status, and recovery tools. See
 [live core updates](docs/LIVE_CORE.md) for activation and recovery controls.
 
 On Windows, use `py -3` in place of `python3`. Every launch requires exactly these
-three provider variables; missing or blank values produce an error listing the
-variables to set. `--help` works without them. `RAYCHAT_BASE_URL` is the API root;
+three provider values. Each is taken from its environment variable when exported,
+otherwise from the selected configuration; a launch with neither, and no terminal
+to ask, produces an error listing the variables to set. `RAYCHAT_IGNORE_PROFILES`
+refuses stored configurations outright, for scripted runs that must depend on the
+environment alone. `--help` works without any of them. `RAYCHAT_BASE_URL` is the
+API root;
 RayChat derives `/chat/completions` and `/models` from it. A complete URL ending
 in `/chat/completions` is also normalized to that same root. There is no default
 provider address or model, and `--model` and `--url` are removed. Other providers'
@@ -39,7 +62,8 @@ credential environment variables are not consulted.
 
 Plugin selection, request options, limits, storage, and rendering settings live
 in [raychat.json](raychat.json). `--config PATH` selects another complete JSON
-configuration. Those settings cannot change the provider token, model, or URL.
+configuration. Those settings cannot change the provider token, model, or URL:
+only an exported variable or the selected configuration supplies those.
 Configuration rejects duplicate keys, invalid types and ranges, non-finite values,
 unsupported versions, and oversized files.
 
